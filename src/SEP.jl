@@ -1,76 +1,110 @@
-module SourceExtract
+module SEP
 
 import Base: collect, -
-export BkgMap, subtract!
+export Background, background
 
-f isfile(joinpath(dirname(@__FILE__),"..","deps","deps.jl"))
+if isfile(joinpath(dirname(@__FILE__),"..","deps","deps.jl"))
     include("../deps/deps.jl")
 else
     error("SEP not properly installed. Please run Pkg.build(\"SEP\")")
 end
 
 # Julia Type -> numeric type code from sep.h
+const SEPImageType = Union{Bool, UInt8, Cint, Cfloat, Cdouble}
 sep_typecode(::Type{Bool}) = Cint(11)
 sep_typecode(::Type{UInt8}) = Cint(11)
 sep_typecode(::Type{Cint}) = Cint(31)
 sep_typecode(::Type{Cfloat}) = Cint(42)
 sep_typecode(::Type{Cdouble}) = Cint(82)
 
+
+# definitions from sep.h
+const SEP_NOISE_NONE = Cint(0)
+const SEP_NOISE_STDDEV = Cint(1)
+const SEP_NOISE_VAR = Cint(2)
+
 function sep_assert_ok(status::Cint)
     if status != 0
-        msg = Array(Uint8, 61)
-        ccall((:sep_get_errmsg, libsep), Void, (Int32,Ptr{Uint8}), status, msg)
-        error(bytestring(msg))
+        msg = Vector{UInt8}(61)
+        ccall((:sep_get_errmsg, libsep), Void, (Int32,Ptr{UInt8}), status, msg)
+        msg[end] = 0  # ensure NULL-termination, just in case.
+        error(unsafe_string(pointer(msg)))
     end
 end
+
+# internal use only.
+struct sep_image
+data::Ptr{Void}
+noise::Ptr{Void}
+mask::Ptr{Void}
+dtype::Cint
+ndtype::Cint
+mdtype::Cint
+w::Cint
+h::Cint
+noiseval::Cdouble
+noise_type::Cshort
+gain::Cdouble
+maskthresh::Cdouble
+end
+
+
 
 # ---------------------------------------------------------------------------
 # Background functions
 
-# This could be made slightly more efficient by mirroring the C struct and
-# changing the C library to not allocate the struct itself (only the
-# internal pointers).
-
-type BkgMap{T}
+mutable struct Background
     ptr::Ptr{Void}
     data_size::Tuple{Int, Int}
 end
 
-function BkgMap{T}(data::Array{T, 2}; mask=nothing, boxsize=(64, 64),
-                   filtersize=(3, 3), filterthresh=0.0, maskthresh=0)
+free!(bkg::Background) = ccall((:sep_bkg_free, libsep), Void, (Ptr{Void},),
+                               bkg.ptr)
+
+
+function background(data::Array{T, 2}; mask=nothing, boxsize=(64, 64),
+                    filtersize=(3, 3), filterthresh=0.0, maskthresh=0) where {T<:SEPImageType}
     sz = size(data)
     dtype = sep_typecode(T)
 
     # mask options
     mdtype = Cint(0)
-    mptr = C_NULL
-    if !isa(mask, Void)
+    mask_ptr = C_NULL
+    if mask !== nothing
         isa(mask, Matrix) || error("mask must be a 2-d array")
         size(mask) == sz || error("data and mask must be same size")
         mdtype = sep_typecode(T)
-        mptr = Ptr{Void}(pointer(mask))
+        mask_ptr = Ptr{Void}(pointer(mask))
     end
 
+    im = sep_image(Ptr{Void}(pointer(data)),
+                   C_NULL,
+                   mask_ptr,
+                   dtype,
+                   Cint(0),
+                   mdtype,
+                   sz[1],
+                   sz[2],
+                   0.0,
+                   SEP_NOISE_NONE,  # SEP_NOISE_NONE
+                   0.0,
+                   Cdouble(maskthresh))
+
     result = Ref{Ptr{Void}}(C_NULL)
-    status = ccall((:sep_makeback, libsep), Cint,
-                   (Ptr{Void}, Ptr{Void}, Cint, Cint, Cint, Cint, Cint, Cint,
-                    Cfloat, Cint, Cint, Cfloat, Ref{Ptr{Void}}),
-                   data, mptr, dtype, mdtype, sz[1], sz[2],
-                   boxsize[1], boxsize[2], maskthresh,
+    status = ccall((:sep_background, libsep), Cint,
+                   (Ptr{sep_image}, Cint, Cint, Cint, Cint, Cdouble,
+                    Ref{Ptr{Void}}),
+                   &im, boxsize[1], boxsize[2],
                    filtersize[1], filtersize[2], filterthresh, result)
     sep_assert_ok(status)
 
-    bkgmap = BkgMap{T}(result[], sz)
-    finalizer(bkgmap, free!)
-    return bkgmap
+    bkg = Background(result[], sz)
+    finalizer(bkg, free!)
+    return bkg
 end
 
-"""
-collect(bkgmap)
-
-Materialize the background as a 2-d array with same type as original data.
-"""
-function collect{T}(bkgmap::BkgMap{T})
+#=
+function collect{T}(bkgmap::Background{T})
     result = Array(T, bkgmap.data_size)
     status = ccall((:sep_backarray, libsep), Cint, (Ptr{Void}, Ptr{Void}, Cint),
                    bkgmap.ptr, result, sep_typecode(T))
@@ -83,21 +117,20 @@ subtract!(bkgmap, A)
 
 Subtract a background from an array in-place.
 """
-function subtract!{T}(bkgmap::BkgMap, A::Array{T, 2})
+function subtract!{T}(bkgmap::Background, A::Array{T, 2})
     status = ccall((:sep_subbackarray, libsep), Cint,
                    (Ptr{Void}, Ptr{Void}, Cint),
                    bkgmap.ptr, A, sep_typecode(T))
     sep_assert_ok(status)
 end
 
-function (-){T}(A::Array{T, 2}, bkgmap::BkgMap)
+function (-){T}(A::Array{T, 2}, bkgmap::Background)
     B = copy(A)
     subtract!(bkgmap, B)
     return B
 end
 
-free!(bkgmap::BkgMap) = ccall((:sep_freeback, libsep), Void, (Ptr{Void},),
-                              bkgmap.ptr)
+=#
 
 # ---------------------------------------------------------------------------
 # Source Extraction
