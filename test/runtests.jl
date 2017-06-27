@@ -1,5 +1,11 @@
-using SEP
+using SourceExtract
 using Base.Test
 
 # write your own tests here
-@test 1 == 1
+using FITSIO
+f = FITS("image.fits")
+data = read(f[1])
+
+bkg = BkgMap(data)
+subtract!(data, bkg)
+print(data)

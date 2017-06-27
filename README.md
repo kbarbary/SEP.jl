@@ -1,3 +1,4 @@
-# SEP
+# SEP.jl
 
-[![Build Status](https://travis-ci.org/kbarbary/SEP.jl.svg?branch=master)](https://travis-ci.org/kbarbary/SEP.jl)
+*Astronomical source detection in Julia*
+
